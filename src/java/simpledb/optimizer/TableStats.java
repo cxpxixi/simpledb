@@ -1,11 +1,14 @@
 package simpledb.optimizer;
 
 import simpledb.common.Database;
+import simpledb.common.DbException;
 import simpledb.common.Type;
 import simpledb.execution.Predicate;
 import simpledb.execution.SeqScan;
 import simpledb.storage.*;
 import simpledb.transaction.Transaction;
+import simpledb.transaction.TransactionAbortedException;
+import simpledb.transaction.TransactionId;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -67,6 +70,13 @@ public class TableStats {
      * histograms.
      */
     static final int NUM_HIST_BINS = 100;
+    private int tableid;
+    private int ioCostPerPage;
+    private int numPages;
+    private TupleDesc tupleDesc;
+    private int totalTuples;
+    private Map<Integer,IntHistogram> intHistogramMap;
+    private Map<Integer,StringHistogram> stringHistogramMap;
 
     /**
      * Create a new TableStats object, that keeps track of statistics on each
@@ -87,8 +97,76 @@ public class TableStats {
         // necessarily have to (for example) do everything
         // in a single scan of the table.
         // some code goes here
+        this.tableid = tableid;
+        this.ioCostPerPage=ioCostPerPage;
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableid);
+        this.numPages = ((HeapFile) dbFile).numPages();
+        this.tupleDesc = dbFile.getTupleDesc();
+        this.totalTuples = 0;
+        this.intHistogramMap = new HashMap<>();
+        this.stringHistogramMap = new HashMap<>();
+
+        try {
+            initHistogram(tableid);
+        } catch (TransactionAbortedException | DbException e) {
+            e.printStackTrace();
+        }
     }
 
+    private void initHistogram(int tableid) throws TransactionAbortedException, DbException {
+        // 第一次遍历，找到最大最小值
+        int size = tupleDesc.numFields();
+        TransactionId tid = new TransactionId();
+        SeqScan seqScan = new SeqScan(tid, tableid);
+        seqScan.open();
+        Map<Integer, Integer> minMap = new HashMap<>();
+        Map<Integer, Integer> maxMap = new HashMap<>();
+        while (seqScan.hasNext()) {
+            Tuple tuple = seqScan.next();
+            totalTuples++;
+            for (int i = 0; i < size; i++) {
+                if (tupleDesc.getFieldType(i).equals(Type.INT_TYPE)) {
+                    IntField field = (IntField) tuple.getField(i);
+                    Integer minVal = minMap.getOrDefault(i, Integer.MAX_VALUE);
+                    minMap.put(i, Math.min(minVal, field.getValue()));
+                    Integer maxVal = maxMap.getOrDefault(i, Integer.MIN_VALUE);
+                    maxMap.put(i, Math.max(maxVal, field.getValue()));
+                } else {
+                    StringHistogram histogram = stringHistogramMap.getOrDefault(i, new StringHistogram(NUM_HIST_BINS));
+                    StringField field = (StringField) tuple.getField(i);
+                    histogram.addValue(field.getValue());
+                    stringHistogramMap.put(i, histogram);
+                }
+            }
+        }
+
+        // 先实例化每列的Histogram
+        // 每列的histogram
+        for (int i = 0; i < size; i++) {
+            if (minMap.get(i) != null) {
+                Integer min = minMap.get(i);
+                Integer max = maxMap.get(i);
+                intHistogramMap.put(i, new IntHistogram(NUM_HIST_BINS, min, max));
+            }
+        }
+        // 第二次遍历,记录每列的Histogram
+        seqScan.rewind();
+        while (seqScan.hasNext()) {
+            Tuple tuple = seqScan.next();
+            for (int i = 0; i < size; i++) {
+                if (tupleDesc.getFieldType(i).equals(Type.INT_TYPE)) {
+                    IntField field = (IntField) tuple.getField(i);
+                    IntHistogram intHistogram = intHistogramMap.get(i);
+                    if (intHistogram == null) {
+                        throw new IllegalArgumentException("参数错误");
+                    }
+                    intHistogram.addValue(field.getValue());
+                    intHistogramMap.put(i, intHistogram);
+                }
+            }
+        }
+        seqScan.close();
+    }
     /**
      * Estimates the cost of sequentially scanning the file, given that the cost
      * to read a page is costPerPageIO. You can assume that there are no seeks
@@ -103,7 +181,7 @@ public class TableStats {
      */
     public double estimateScanCost() {
         // some code goes here
-        return 0;
+        return numPages*ioCostPerPage*2;
     }
 
     /**
@@ -117,7 +195,7 @@ public class TableStats {
      */
     public int estimateTableCardinality(double selectivityFactor) {
         // some code goes here
-        return 0;
+        return (int)(totalTuples*selectivityFactor);
     }
 
     /**
@@ -132,7 +210,12 @@ public class TableStats {
      * */
     public double avgSelectivity(int field, Predicate.Op op) {
         // some code goes here
-        return 1.0;
+        if (tupleDesc.getFieldType(field).equals(Type.INT_TYPE)){
+            return intHistogramMap.get(field).avgSelectivity();
+        }
+        else {
+            return stringHistogramMap.get(field).avgSelectivity();
+        }
     }
 
     /**
@@ -150,7 +233,14 @@ public class TableStats {
      */
     public double estimateSelectivity(int field, Predicate.Op op, Field constant) {
         // some code goes here
-        return 1.0;
+        Type fieldType = tupleDesc.getFieldType(field);
+        if (fieldType.equals(Type.INT_TYPE))
+        {
+            return intHistogramMap.get(field).estimateSelectivity(op,((IntField)constant).getValue());
+        }
+        else {
+            return stringHistogramMap.get(field).estimateSelectivity(op,((StringField)constant).getValue());
+        }
     }
 
     /**
@@ -158,7 +248,7 @@ public class TableStats {
      * */
     public int totalTuples() {
         // some code goes here
-        return 0;
+        return this.totalTuples;
     }
 
 }

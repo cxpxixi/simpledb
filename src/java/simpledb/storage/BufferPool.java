@@ -9,9 +9,7 @@ import simpledb.transaction.TransactionId;
 
 import java.io.*;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -38,6 +36,8 @@ public class BufferPool {
 
     private int numPages;
     private Map<PageId,Page> pageMap;
+
+    private Deque<PageId> FIFO;
     /**
      * Creates a BufferPool that caches up to numPages pages.
      *
@@ -47,6 +47,7 @@ public class BufferPool {
         // some code goes here
         this.numPages=numPages;
         pageMap=new HashMap<>();
+        FIFO=new ArrayDeque<>(numPages);
     }
     
     public static int getPageSize() {
@@ -85,9 +86,10 @@ public class BufferPool {
         {
             DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
             Page page = dbFile.readPage(pid);
+            FIFO.add(pid);
             if (pageMap.size()==numPages)
             {
-                throw new DbException("");
+                evictPage();
             }
             pageMap.put(pid,page);
         }
@@ -156,6 +158,8 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+        updateBufferPool(dbFile.insertTuple(tid,t),tid);
     }
 
     /**
@@ -175,8 +179,19 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
+        updateBufferPool(dbFile.deleteTuple(tid,t),tid);
     }
 
+    public void updateBufferPool(List<Page> pages, TransactionId tid) throws DbException{
+        for (Page page: pages) {
+            page.markDirty(true,tid);
+            if (pageMap.size()==numPages){
+                evictPage();
+            }
+            pageMap.put(page.getId(),page);
+        }
+    }
     /**
      * Flush all dirty pages to disk.
      * NB: Be careful using this routine -- it writes dirty data to disk so will
@@ -185,7 +200,12 @@ public class BufferPool {
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
-
+        for (Map.Entry<PageId, Page> entry : pageMap.entrySet()) {
+            Page page = entry.getValue();
+            if (page.isDirty()!=null){
+                flushPage(page.getId());
+            }
+        }
     }
 
     /** Remove the specific page id from the buffer pool.
@@ -199,6 +219,7 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
+        pageMap.remove(pid);
     }
 
     /**
@@ -208,6 +229,16 @@ public class BufferPool {
     private synchronized  void flushPage(PageId pid) throws IOException {
         // some code goes here
         // not necessary for lab1
+        Page page = pageMap.get(pid);
+        int tableId = pid.getTableId();
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+        TransactionId tid = page.isDirty();
+//        if (tid!=null){
+//            Database.getLogFile().logWrite(tid, page.getBeforeImage(), page);
+//            Database.getLogFile().force();
+//        }
+        dbFile.writePage(page);
+        page.markDirty(false,null);
     }
 
     /** Write all pages of the specified transaction to disk.
@@ -215,6 +246,13 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        for (Map.Entry<PageId,Page> entry: pageMap.entrySet()) {
+            Page page = entry.getValue();
+//            page.setBeforeImage();
+            if (page.isDirty()==tid){
+                flushPage(page.getId());
+            }
+        }
     }
 
     /**
@@ -224,6 +262,19 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
+        PageId pageId = FIFO.poll();
+        Page page = pageMap.get(pageId);
+        if (page.isDirty()!=null)
+        {
+            try {
+                flushPage(pageId);
+                discardPage(pageId);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }else {
+            discardPage(pageId);
+        }
     }
 
 }
