@@ -4,6 +4,7 @@ import simpledb.common.Database;
 import simpledb.common.Permissions;
 import simpledb.common.DbException;
 import simpledb.common.DeadlockException;
+import simpledb.storage.lock.LockManager;
 import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
@@ -38,6 +39,7 @@ public class BufferPool {
     private Map<PageId,Page> pageMap;
 
     private Deque<PageId> FIFO;
+    private LockManager lockManager;
     /**
      * Creates a BufferPool that caches up to numPages pages.
      *
@@ -46,8 +48,9 @@ public class BufferPool {
     public BufferPool(int numPages) {
         // some code goes here
         this.numPages=numPages;
-        pageMap=new HashMap<>();
+        pageMap=new ConcurrentHashMap<>();
         FIFO=new ArrayDeque<>(numPages);
+        lockManager=new LockManager();
     }
     
     public static int getPageSize() {
@@ -82,6 +85,25 @@ public class BufferPool {
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
+        int acquireType=0;
+        if (perm == Permissions.READ_WRITE) {
+            acquireType = 1;
+        }
+        long start = System.currentTimeMillis();
+        long timeout = new Random().nextInt(2000) + 1000;
+        while (true) {
+            try {
+                if (lockManager.acquireLock(pid, tid, acquireType)) {
+                    break;
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            long now = System.currentTimeMillis();
+            if (now - start > timeout) {
+                throw new TransactionAbortedException();
+            }
+        }
         if (!pageMap.containsKey(pid))
         {
             DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
@@ -108,6 +130,7 @@ public class BufferPool {
     public  void unsafeReleasePage(TransactionId tid, PageId pid) {
         // some code goes here
         // not necessary for lab1|lab2
+        lockManager.releaseLock(pid,tid);
     }
 
     /**
@@ -118,13 +141,14 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) {
         // some code goes here
         // not necessary for lab1|lab2
+        transactionComplete(tid,true);
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
     public boolean holdsLock(TransactionId tid, PageId p) {
         // some code goes here
         // not necessary for lab1|lab2
-        return false;
+        return lockManager.isHoldLock(p,tid);
     }
 
     /**
@@ -137,8 +161,30 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
+        if (commit){
+            try {
+                flushPages(tid);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        else {
+            recoverPages(tid);
+        }
+        lockManager.completeTransaction(tid);
     }
 
+    private synchronized void recoverPages(TransactionId tid) {
+        for (Map.Entry<PageId,Page> entry:pageMap.entrySet()) {
+            PageId pageid=entry.getKey();
+            Page page = entry.getValue();
+            if (page.isDirty()==tid){
+                DbFile dbFile = Database.getCatalog().getDatabaseFile(pageid.getTableId());
+                Page page1 = dbFile.readPage(pageid);
+                pageMap.put(pageid,page1);
+            }
+        }
+    }
     /**
      * Add a tuple to the specified table on behalf of transaction tid.  Will
      * acquire a write lock on the page the tuple is added to and any other 
@@ -262,18 +308,26 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
-        PageId pageId = FIFO.poll();
-        Page page = pageMap.get(pageId);
-        if (page.isDirty()!=null)
-        {
-            try {
-                flushPage(pageId);
-                discardPage(pageId);
-            } catch (IOException e) {
-                e.printStackTrace();
+        PageId pageId = null;
+        Page page = null;
+        boolean isAllDirty=true;
+        for (int i = 0; i < pageMap.size(); i++) {
+            pageId=FIFO.poll();
+            page=pageMap.get(pageId);
+            if (page==null){
+                continue;
             }
-        }else {
-            discardPage(pageId);
+            if (page.isDirty()!=null){
+                FIFO.add(pageId);
+            }
+            else {
+                isAllDirty=false;
+                discardPage(pageId);
+                break;
+            }
+        }
+        if (isAllDirty){
+            throw new DbException("");
         }
     }
 
