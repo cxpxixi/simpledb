@@ -20,7 +20,7 @@ import java.io.Serializable;
  * @see BTreeInternalPage#updateEntry(BTreeEntry)
  *
  */
-public class BTreeEntry implements Serializable {
+public class  BTreeEntry implements Serializable {
 
 	private static final long serialVersionUID = 1L;
 	
