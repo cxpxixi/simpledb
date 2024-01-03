@@ -279,10 +279,13 @@ public class BufferPool {
         int tableId = pid.getTableId();
         DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
         TransactionId tid = page.isDirty();
-//        if (tid!=null){
-//            Database.getLogFile().logWrite(tid, page.getBeforeImage(), page);
-//            Database.getLogFile().force();
-//        }
+
+        // append an update record to the log, with a before-image and after-image
+        TransactionId dirtier = page.isDirty();
+        if (dirtier != null) {
+            Database.getLogFile().logWrite(dirtier, page.getBeforeImage(), page);
+            Database.getLogFile().force();
+        }
         dbFile.writePage(page);
         page.markDirty(false,null);
     }
@@ -294,7 +297,7 @@ public class BufferPool {
         // not necessary for lab1|lab2
         for (Map.Entry<PageId,Page> entry: pageMap.entrySet()) {
             Page page = entry.getValue();
-//            page.setBeforeImage();
+            page.setBeforeImage();
             if (page.isDirty()==tid){
                 flushPage(page.getId());
             }

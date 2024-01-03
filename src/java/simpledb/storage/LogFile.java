@@ -460,9 +460,47 @@ public class LogFile {
             synchronized(this) {
                 preAppend();
                 // some code goes here
+                Long offset = tidToFirstLogRecord.get(tid.getId());
+                raf.seek(offset);
+                Set<PageId> pageIdSet = new HashSet<>();
+                while(true){
+                    // 前置判断,判断raf是否已经遍历到末尾
+                    if (raf.getFilePointer() == raf.length()) {
+                        break;
+                    }
+                    int type = raf.readInt();
+                    long transactionId = raf.readLong();
+                    // 前置判断,判断日志记录类型是否为包含前置镜像和后置镜像的UPDATE类型
+                    if (type == UPDATE_RECORD) {
+                        // throw new RuntimeException("tid offset does not point to UPDATE record");
+                        // 读取事务对应页的前置镜像,并根据前置镜像进行回滚
+                        Page before = readPageData(raf);
+                        Page after = readPageData(raf);
+                        // 前置镜像PageId
+                        PageId pid = before.getId();
+                        // 确保记录的事务id和当前回滚的事务的id相等
+                        // 并且该页面此前没有进行过回滚,如果进行过回顾则无需重复回滚
+                        if (transactionId == tid.getId() && !pageIdSet.contains(pid)) {
+                            pageIdSet.add(pid);
+                            // 丢弃BufferPool中事务对应的pid
+                            Database.getBufferPool().discardPage(pid);
+                            // 将前置镜像写回表文件
+                            Database.getCatalog().getDatabaseFile(pid.getTableId()).writePage(before);
+                        }
+                    } else if (type == CHECKPOINT_RECORD) {
+                        int count = raf.readInt();
+                        while (count-- > 0) {
+                            raf.readLong();
+                            raf.readLong();
+                        }
+                    }
+                    raf.readLong();
+                }
+                // 将raf的文件指针指向正确的偏移位置
+                raf.seek(raf.length());
+                }
             }
         }
-    }
 
     /** Shutdown the logging system, writing out whatever state
         is necessary so that start up can happen quickly (without
@@ -487,6 +525,65 @@ public class LogFile {
             synchronized (this) {
                 recoveryUndecided = false;
                 // some code goes here
+                recoveryUndecided = false;
+                raf.seek(0);
+                // 已提交事务集合
+                Set<Long> commitId = new HashSet<>();
+                // 事务id-前置镜像
+                Map<Long, List<Page>> beforePages = new HashMap<>();
+                // 事务id-后置镜像
+                Map<Long, List<Page>> afterPages = new HashMap<>();
+                long checkpoint = raf.readLong();
+//                if (checkpoint != -1) {
+//                    raf.seek(checkpoint);
+//                }
+                while (true) {
+                    // 前置判断,判断raf是否已经遍历到末尾
+                    if (raf.getFilePointer() == raf.length()) {
+                        break;
+                    }
+                    int type = raf.readInt();
+                    long tid = raf.readLong();
+                    if (type == UPDATE_RECORD) {
+                        Page before_image = readPageData(raf);
+                        Page after_image = readPageData(raf);
+                        List<Page> before = beforePages.getOrDefault(tid, new ArrayList<>());
+                        before.add(before_image);
+                        beforePages.put(tid, before);
+                        List<Page> after = afterPages.getOrDefault(tid, new ArrayList<>());
+                        after.add(after_image);
+                        afterPages.put(tid, after);
+                    } else if (type == COMMIT_RECORD) {
+                        commitId.add(tid);
+                    } else if (type == CHECKPOINT_RECORD) {
+                        int count = raf.readInt();
+                        while (count-- > 0) {
+                            raf.readLong();
+                            raf.readLong();
+                        }
+                    }
+                    raf.readLong();
+                }
+
+                // 处理未提交的事务
+                for (Long tid : beforePages.keySet()) {
+                    if (!commitId.contains(tid)) {
+                        List<Page> pages = beforePages.get(tid);
+                        for (Page page : pages) {
+                            Database.getCatalog().getDatabaseFile(page.getId().getTableId()).writePage(page);
+                        }
+                    }
+                }
+
+                // 处理已提交的事务
+                for (Long tid : commitId) {
+                    if (afterPages.containsKey(tid)) {
+                        List<Page> pages = afterPages.get(tid);
+                        for (Page page : pages) {
+                            Database.getCatalog().getDatabaseFile(page.getId().getTableId()).writePage(page);
+                        }
+                    }
+                }
             }
          }
     }
